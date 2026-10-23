@@ -1,0 +1,96 @@
+# Runs when main has a Cargo.toml version that has no release yet.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1).Matches[0].Groups[1].Value
+          $tag = "v$version"
+          gh release view $tag *> $null
+          $exists = ($LASTEXITCODE -eq 0).ToString().ToLower()
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "exists=$exists" >> $env:GITHUB_OUTPUT
+          if ($exists -eq 'true') { "Release $tag already exists, nothing to do." }
+          exit 0
+
+      - name: Extract changelog section
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $heading = '^## \[' + [regex]::Escape($version) + '\]'
+          $notes = @(); $found = $false
+          foreach ($line in Get-Content CHANGELOG.md) {
+            if ($line -match '^## \[') {
+              if ($found) { break }
+              $found = $line -match $heading
+              continue
+            }
+            if ($found -and $line -notmatch '^\[[^\]]+\]:\s') { $notes += $line }
+          }
+          $body = ($notes -join "`n").Trim()
+          if (-not $found -or -not $body) {
+            throw "CHANGELOG.md has no '## [$version]' section with content. Add one before bumping the version."
+          }
+          Set-Content release-notes.md $body
+          Get-Content release-notes.md
+
+      - name: Install Rust
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Test
+        if: steps.version.outputs.exists == 'false'
+        run: cargo test --locked
+
+      - name: Build
+        if: steps.version.outputs.exists == 'false'
+        run: cargo build --release --locked
+
+      - name: Package
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/devplay.exe dist/devplay.exe
+          Compress-Archive -Path dist/devplay.exe, README.md, LICENSE, CHANGELOG.md -DestinationPath "dist/devplay-$tag-windows-x64.zip"
+          Get-ChildItem dist -File | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content dist/SHA256SUMS.txt
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: Publish release
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $assets = (Get-ChildItem dist -File).FullName
+          gh release create $tag @assets --title "DevPlay $tag" --notes-file release-notes.md --target $env:GITHUB_SHA
