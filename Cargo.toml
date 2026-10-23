@@ -11,7 +11,7 @@ keywords = ["windows", "tray", "gaming", "docker", "wsl"]
 categories = ["command-line-utilities"]
 
 [dependencies.windows-sys]
-version = "0.59.0"
+version = "0.61.2"
 features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
